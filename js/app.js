@@ -2225,6 +2225,7 @@
     'staple.update': ['修改常备预警', 'a-shop', '✏️'],
     'staple.remove': ['删除常备预警', 'a-remove', '🧹'],
     'staple.alert': ['常备预警：生成待购', 'a-shop', '🔔'],
+    'staple.alert.update': ['常备预警：更新建议量', 'a-shop', '🔔'],
     'staple.resolve': ['常备预警解除', 'a-shop', '✅'],
     'member.add': ['添加家庭成员', 'a-shop', '🧑'],
     'member.update': ['修改成员饮食信息', 'a-shop', '✏️'],
@@ -2266,6 +2267,10 @@
       if (e.action === 'staple.add') lines.push('常备数量：' + (d.minQty != null ? d.minQty + ' 份' : '—'));
       if (e.action === 'staple.alert') {
         lines.push('在库 ' + d.inStock + ' 份 < 常备 ' + d.minQty + ' 份，已生成待购项（建议购买 ' + d.suggestedQty + ' 份）');
+      }
+      if (e.action === 'staple.alert.update') {
+        lines.push('在库 ' + d.inStock + ' 份 / 常备 ' + d.minQty + ' 份，待购建议量 ' +
+          esc(d.qtyFrom || '—') + ' → ' + esc(d.qtyTo || ''));
       }
       if (e.action === 'staple.resolve') {
         lines.push('在库回升至 ' + d.inStock + ' 份（常备 ' + d.minQty + ' 份），自动待购项已撤下');

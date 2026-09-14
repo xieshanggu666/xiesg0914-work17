@@ -1044,10 +1044,12 @@
     // 模型：为常用食材设常备数量 minQty；每次库存变动后 syncStaplesImpl() 重估：
     //   · 在库（未归档未删除的同名食材条数）< minQty 且没有开口待购覆盖
     //     → 自动生成 source='staple' 的待购项，数量 = 建议购买量（minQty − 在库）；
+    //   · 已有本预警的自动待购 → 建议购买量随当前缺口重算（qty 始终 = minQty − 在库），
+    //     避免照着生成时的旧数量买多/买少；认领/负责人不受影响；
     //   · 在库回升到常备线（买到录入/撤销归档/恢复记录等任意路径）
     //     → 预警解除，自动生成的开口待购项随之撤下；
-    //   · 已有同名开口待购（手动/补货来源）视为已覆盖，不重复生成。
-    // 预警的生成与解除、常备设置的增删改全部写入 audit。
+    //   · 已有同名开口待购（手动/补货来源）视为已覆盖，不重复生成、不改写其数量。
+    // 预警的生成/重算/解除、常备设置的增删改全部写入 audit。
     function normName(v) {
       return String(v == null ? '' : v).trim().toLowerCase().replace(/\s+/g, '');
     }
@@ -1110,6 +1112,20 @@
               inStock: stt.inStock, minQty: st.minQty,
               suggestedQty: stt.suggestedQty, shoppingId: entry.id
             });
+          } else if (stt.autoShoppingId) {
+            // 已有本预警的自动待购：建议购买量随当前在库缺口重算，
+            // 否则用户会照着生成时的旧数量购买（在库已回升后仍写旧数，照着买就买多了）
+            var auto = getShopping(stt.autoShoppingId);
+            var wantQty = stt.suggestedQty + ' 份';
+            if (auto && auto.qty !== wantQty) {
+              var prevQty = auto.qty;
+              auto.qty = wantQty;
+              log('staple.alert.update', {
+                stapleId: st.id, name: st.name, shoppingId: auto.id,
+                inStock: stt.inStock, minQty: st.minQty,
+                qtyFrom: prevQty, qtyTo: wantQty
+              });
+            }
           }
         } else if (stt.autoShoppingId) {
           var sid = stt.autoShoppingId;

@@ -81,6 +81,61 @@ test('已有同名开口待购（手动/补货）视为已覆盖，不再自动�
   assert.equal(st.auditEntries().filter(e => e.action === 'staple.alert').length, 0);
 });
 
+test('在库变化时自动待购的建议购买量随之重算（bug：照旧数量会买多）', () => {
+  const st = Storage.createStore(memBackend());
+  st.addStaple({ name: '鸡蛋', categoryId: 'egg', minQty: 5 });
+  const auto = st.listShopping('open')[0];
+  assert.equal(auto.qty, '5 份', '在库 0 时建议买 5 份');
+  // 手动录入 3 份（不经待购流程）：缺口 5→2，待购数量必须跟着改
+  addEggs(st, 3);
+  assert.equal(st.getShopping(auto.id).qty, '2 份', '在库 3 后建议量应重算为 2 份');
+  assert.equal(st.listShopping('open').length, 1, '仍是同一条待购，不新建');
+  // 吃掉 1 份：缺口回到 3
+  const egg = st.listItems().filter(i => i.name === '鸡蛋')[0];
+  st.addEvent(egg.id, 'consume', { at: '2026-09-14' });
+  assert.equal(st.getShopping(auto.id).qty, '3 份', '消耗后建议量应回升');
+  // 重算全程写流水：三次录入各重算一次（5→4→3→2 份），消耗后再重算一次（2→3 份）
+  const upds = st.auditEntries().filter(e => e.action === 'staple.alert.update');
+  assert.equal(upds.length, 4, '每次在库变动都应重算建议量');
+  // 流水倒序（最新在前）
+  assert.equal(upds[0].detail.qtyFrom, '2 份');
+  assert.equal(upds[0].detail.qtyTo, '3 份');
+  assert.equal(upds[0].detail.inStock, 2);
+  assert.equal(upds[0].detail.shoppingId, auto.id);
+  assert.equal(upds[1].detail.qtyFrom, '3 份');
+  assert.equal(upds[1].detail.qtyTo, '2 份');
+  assert.equal(upds[1].detail.inStock, 3);
+  assert.equal(upds[1].detail.minQty, 5);
+  assert.equal(upds[3].detail.qtyFrom, '5 份');
+  assert.equal(upds[3].detail.qtyTo, '4 份');
+  assert.equal(upds[3].detail.inStock, 1);
+});
+
+test('已认领的自动待购同样重算建议量，认领状态不受影响；数量不变不写流水', () => {
+  const st = Storage.createStore(memBackend());
+  st.addStaple({ name: '鸡蛋', categoryId: 'egg', minQty: 3 });
+  const auto = st.listShopping('open')[0];
+  st.claimShopping(auto.id, '妈妈');
+  addEggs(st, 1); // 缺口 3→2
+  const now = st.getShopping(auto.id);
+  assert.equal(now.qty, '2 份');
+  assert.equal(now.status, 'claimed');
+  assert.equal(now.assignee, '妈妈', '重算只改数量，不动负责人');
+  // 与缺口无关的库存变动：数量不变，不应产生新的重算流水
+  st.addItem(MILK);
+  assert.equal(st.auditEntries().filter(e => e.action === 'staple.alert.update').length, 1);
+});
+
+test('覆盖预警的手动待购项数量不被系统改写', () => {
+  const st = Storage.createStore(memBackend());
+  st.addShopping({ name: '鸡蛋', qty: '10 斤' }); // 用户自己填的数量
+  st.addStaple({ name: '鸡蛋', categoryId: 'egg', minQty: 5 });
+  addEggs(st, 3);
+  assert.equal(st.listShopping('open').length, 1, '手动待购覆盖，不生成自动项');
+  assert.equal(st.listShopping('open')[0].qty, '10 斤', '手动待购保持用户填写');
+  assert.equal(st.auditEntries().filter(e => e.action === 'staple.alert.update').length, 0);
+});
+
 test('吃到低于常备线：吃完事件触发自动生成待购', () => {
   const st = Storage.createStore(memBackend());
   const eggs = addEggs(st, 2);

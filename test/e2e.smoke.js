@@ -729,6 +729,50 @@ function check(name, cond) {
     !$$('#shoppingList .shop-card').some(c => /测试鸡蛋/.test(c.textContent)));
   check('删除常备写入追溯', window.__store.auditEntries().some(e => e.action === 'staple.remove'));
 
+  // 9e-8. 回归（bug 修复）：自动待购的建议购买量随在库变化重算——
+  // 常备 5 份、在库 0 时生成“要买 5 份”，手动录入 3 份后必须变为 2 份，否则照着买就买多了
+  $('#btnAddStaple').click();
+  $('#stName').value = '测试大米';
+  fire($('#stName'), 'input');
+  check('大米自动识别为干货分类', $('#stCategory').value === 'dry');
+  $('#stMinQty').value = '5';
+  fire($('#stapleForm'), 'submit');
+  const riceCard = $$('#shoppingList .shop-card').find(c => /测试大米/.test(c.textContent));
+  check('在库 0 时待购建议 5 份', !!riceCard && /要买：5 份/.test(riceCard.textContent));
+  const riceShopId = riceCard.querySelector('[data-buy]').getAttribute('data-buy');
+  // 手动录入 3 份（不经待购流程，直接调存储层模拟录入）
+  for (let ri = 0; ri < 3; ri++) {
+    window.__store.addItem(
+      { name: '测试大米', categoryId: 'dry', purchaseDate: '2026-09-14', packageType: 'sealed', location: 'pantry' }, 'test');
+  }
+  window.__renderAll();
+  const riceCard2 = $$('#shoppingList .shop-card').find(c => /测试大米/.test(c.textContent));
+  check('录入 3 份后待购建议重算为 2 份', !!riceCard2 && /要买：2 份/.test(riceCard2.textContent));
+  check('重算更新的是同一条待购（未新建）',
+    riceCard2.querySelector('[data-buy]').getAttribute('data-buy') === riceShopId);
+  const riceRow = $$('#stapleList .staple-card').find(c => /测试大米/.test(c.textContent));
+  check('常备卡片与待购数量一致（在库 3 / 建议 2 份）',
+    /在库 3 份/.test(riceRow.textContent) && /建议购买 2 份/.test(riceRow.textContent));
+  // 再吃掉 1 份：建议量回升为 3 份
+  const riceItem = window.__store.listItems().find(i => i.name === '测试大米');
+  window.__store.addEvent(riceItem.id, 'consume', { at: '2026-09-14' }, 'test');
+  window.__renderAll();
+  check('消耗 1 份后待购建议回升为 3 份',
+    /要买：3 份/.test($$('#shoppingList .shop-card').find(c => /测试大米/.test(c.textContent)).textContent));
+  // 重算流水与界面展示
+  $$('.tab[data-view]').find(t => t.dataset.view === 'history').click();
+  check('追溯包含建议量重算（5 份 → 4 份…→ 3 份）',
+    /常备预警：更新建议量/.test($('#auditList').textContent) && /5 份 → 4 份/.test($('#auditList').textContent));
+  // 清理：删除该常备，撤下自动待购
+  $$('.tab[data-view]').find(t => t.dataset.view === 'shopping').click();
+  $$('#stapleList [data-del-staple]').find(b => {
+    const st = window.__store.getStaple(b.getAttribute('data-del-staple'));
+    return st && st.name === '测试大米';
+  }).click();
+  check('清理：删除测试大米常备及其自动待购',
+    !$$('#stapleList .staple-card').some(c => /测试大米/.test(c.textContent)) &&
+    !$$('#shoppingList .shop-card').some(c => /测试大米/.test(c.textContent)));
+
   // 10. 持久化：刷新后数据仍在
   const persisted = JSON.parse(window.localStorage.getItem('freshkeeper:v1'));
   check('localStorage 持久化（含待购清单）', persisted.items.length >= 10 &&
