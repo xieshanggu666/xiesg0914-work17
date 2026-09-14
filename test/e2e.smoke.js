@@ -642,6 +642,93 @@ function check(name, cond) {
   $$('.tab[data-view]').find(t => t.dataset.view === 'history').click();
   check('追溯包含添加家庭成员', /添加家庭成员/.test($('#auditList').textContent));
 
+  // 9e. 常备食材预警：设常备数量 → 低于自动生成待购（带建议购买量）→ 买到录入解除 → 全程流水
+  // 9e-1. 演示数据自带“鸡蛋 常备 1 份”，库存有 1 样鸡蛋，显示充足且不生成待购
+  $$('.tab[data-view]').find(t => t.dataset.view === 'shopping').click();
+  const stapleInitRows = $$('#stapleList .staple-card');
+  check('补货页展示常备预警块（演示鸡蛋）', stapleInitRows.length === 1 &&
+    /鸡蛋/.test(stapleInitRows[0].textContent) && /充足/.test(stapleInitRows[0].textContent));
+  check('充足时不生成自动待购', !$$('#shoppingList .shop-card').some(c => /常备预警/.test(c.textContent)));
+
+  // 9e-2. 设置“测试鸡蛋 常备 2 份”：在库 0 → 自动生成待购项，建议购买 2 份
+  $('#btnAddStaple').click();
+  check('常备表单打开', !$('#sheetStaple').hidden);
+  $('#stName').value = '测试鸡蛋';
+  fire($('#stName'), 'input');
+  check('常备名称自动识别分类', $('#stCategory').value === 'egg');
+  $('#stMinQty').value = '2';
+  fire($('#stapleForm'), 'submit');
+  check('常备保存后弹层关闭', $('#sheetStaple').hidden === true);
+  const lowRow = $$('#stapleList .staple-card').find(c => /测试鸡蛋/.test(c.textContent));
+  check('在库低于常备显示需补货与建议购买量', !!lowRow && /需补货/.test(lowRow.textContent) &&
+    /在库 0 份/.test(lowRow.textContent) && /建议购买 2 份/.test(lowRow.textContent));
+  const autoCard = $$('#shoppingList .shop-card').find(c => /测试鸡蛋/.test(c.textContent));
+  check('低于常备自动生成待购项（🔔 常备预警 + 建议购买量）', !!autoCard &&
+    /🔔 常备预警/.test(autoCard.textContent) && /要买：2 份/.test(autoCard.textContent) &&
+    /待认领/.test(autoCard.textContent));
+
+  // 9e-3. 同名/非法数量被拦截，弹层保持
+  $('#btnAddStaple').click();
+  $('#stName').value = '测试鸡蛋';
+  $('#stMinQty').value = '1';
+  fire($('#stapleForm'), 'submit');
+  check('同名常备被拒绝（弹层保持）', $('#sheetStaple').hidden === false);
+  $('#stName').value = '测试大米';
+  $('#stMinQty').value = '0';
+  fire($('#stapleForm'), 'submit');
+  check('常备数量为 0 被拒绝（弹层保持）', $('#sheetStaple').hidden === false);
+  $('#sheetStaple').hidden = true;
+
+  // 9e-4. 第一次「已买到」只买回 1 份：原待购完成，仍低于常备 → 立即生成新预警（建议 1 份）
+  autoCard.querySelector('[data-buy]').click();
+  check('预警待购点已买到打开录入表单并预填', !$('#sheetForm').hidden && $('#fName').value === '测试鸡蛋');
+  fire($('#itemForm'), 'submit');
+  check('录入后弹层关闭', $('#sheetForm').hidden === true);
+  const openAfterFirst = $$('#shoppingList .shop-card').filter(c => /测试鸡蛋/.test(c.textContent));
+  check('买 1 份后仍低于常备：出现新的预警待购（建议 1 份）', openAfterFirst.length === 1 &&
+    /🔔 常备预警/.test(openAfterFirst[0].textContent) && /要买：1 份/.test(openAfterFirst[0].textContent));
+  const stillLow = $$('#stapleList .staple-card').find(c => /测试鸡蛋/.test(c.textContent));
+  check('常备卡片仍显示需补货（在库 1 份）', /需补货/.test(stillLow.textContent) && /在库 1 份/.test(stillLow.textContent));
+
+  // 9e-5. 第二次「已买到」补到常备线：预警自动解除，开口自动待购撤下
+  openAfterFirst[0].querySelector('[data-buy]').click();
+  fire($('#itemForm'), 'submit');
+  check('买够后开口待购中已无测试鸡蛋（预警解除）',
+    !$$('#shoppingList .shop-card').some(c => /测试鸡蛋/.test(c.textContent)));
+  const okRow = $$('#stapleList .staple-card').find(c => /测试鸡蛋/.test(c.textContent));
+  check('常备卡片转为充足（在库 2 份）', /充足/.test(okRow.textContent) && /在库 2 份/.test(okRow.textContent));
+
+  // 9e-6. 追溯：设置/生成/解除/完成补货全程有流水
+  $$('.tab[data-view]').find(t => t.dataset.view === 'history').click();
+  const stapleAudit = $('#auditList').textContent;
+  check('追溯包含设置常备预警', /设置常备预警/.test(stapleAudit));
+  check('追溯包含预警生成待购及建议购买量', /常备预警：生成待购/.test(stapleAudit) && /建议购买 2 份/.test(stapleAudit));
+  check('追溯包含预警解除', /常备预警解除/.test(stapleAudit));
+
+  // 9e-7. 编辑调高常备数量 → 重新触发预警；删除常备 → 待认领自动待购一并撤下
+  $$('.tab[data-view]').find(t => t.dataset.view === 'shopping').click();
+  const editStapleBtn = $$('#stapleList [data-edit-staple]').find(b => {
+    const st = window.__store.getStaple(b.getAttribute('data-edit-staple'));
+    return st && st.name === '测试鸡蛋';
+  });
+  editStapleBtn.click();
+  check('编辑常备表单预填', !$('#sheetStaple').hidden && $('#stName').value === '测试鸡蛋' &&
+    Number($('#stMinQty').value) === 2);
+  $('#stMinQty').value = '3';
+  fire($('#stapleForm'), 'submit');
+  check('调高常备数量后重新生成预警待购',
+    $$('#shoppingList .shop-card').some(c => /测试鸡蛋/.test(c.textContent) && /🔔 常备预警/.test(c.textContent)));
+  check('修改常备写入追溯', window.__store.auditEntries().some(e => e.action === 'staple.update'));
+  const delStapleBtn = $$('#stapleList [data-del-staple]').find(b => {
+    const st = window.__store.getStaple(b.getAttribute('data-del-staple'));
+    return st && st.name === '测试鸡蛋';
+  });
+  delStapleBtn.click(); // confirm 已自动通过
+  check('删除常备后卡片消失', !$$('#stapleList .staple-card').some(c => /测试鸡蛋/.test(c.textContent)));
+  check('删除常备后待认领自动待购一并撤下',
+    !$$('#shoppingList .shop-card').some(c => /测试鸡蛋/.test(c.textContent)));
+  check('删除常备写入追溯', window.__store.auditEntries().some(e => e.action === 'staple.remove'));
+
   // 10. 持久化：刷新后数据仍在
   const persisted = JSON.parse(window.localStorage.getItem('freshkeeper:v1'));
   check('localStorage 持久化（含待购清单）', persisted.items.length >= 10 &&
@@ -651,6 +738,8 @@ function check(name, cond) {
   check('localStorage 持久化（含家庭成员及饮食标签）', Array.isArray(persisted.members) &&
     persisted.members.some(m => m.name === '奶奶' && m.allergyTags.includes('cat:seafood') &&
       m.allergyTags.includes('花生')));
+  check('localStorage 持久化（含常备食材预警）', Array.isArray(persisted.staples) &&
+    persisted.staples.some(s => s.name === '鸡蛋' && s.minQty === 1));
 
   // 11. 清空全部数据：业务数据与家庭成员身份一并删除（jsdom 的 location.reload 为 no-op，可直接校验存储）
   window.localStorage.setItem('freshkeeper:member', '妈妈');

@@ -75,6 +75,7 @@
     mealDinerIds: [],      // 用餐计划表单选中的就餐成员
     editingMemberId: null, // 正在编辑的成员
     memberFormTags: { allergy: [], avoid: [], prefer: [] }, // 成员表单标签草稿
+    editingStapleId: null, // 正在编辑的常备食材预警
     dietCtx: null          // 冲突解决弹层上下文（见 openDietResolver）
   };
 
@@ -118,7 +119,8 @@
       ['食材记录（含修订/事件）', info.parts.items, info.counts.items + ' 样'],
       ['待购清单', info.parts.shopping, info.counts.shopping + ' 条'],
       ['用餐计划', info.parts.mealPlans, info.counts.mealPlans + ' 条'],
-      ['家庭成员', info.parts.members, info.counts.members + ' 位']
+      ['家庭成员', info.parts.members, info.counts.members + ' 位'],
+      ['常备食材预警', info.parts.staples, info.counts.staples + ' 条']
     ];
     $('#storageStats').innerHTML =
       '<div style="margin-bottom:4px">当前本机数据约 <b>' + humanBytes(info.totalBytes) + '</b>，占用分布：</div>' +
@@ -378,7 +380,11 @@
       if (purchaseShopId) {
         var doneRes = guard(function () { return store.completeShopping(purchaseShopId, saved.id); });
         if (!doneRes.ok) return;
-        toast('已录入并完成补货：' + fields.name);
+        // 常备预警的自动待购项：录入后库存已达常备线，预警同步解除、待购项已自动撤下，
+        // completeShopping 返回 false——这不是失败，按“预警解除”告知
+        toast(doneRes.value === false
+          ? '已录入：' + fields.name + '（库存已达常备量，预警自动解除）'
+          : '已录入并完成补货：' + fields.name);
       } else {
         toast('已录入：' + fields.name);
       }
@@ -647,6 +653,114 @@
     return '<button class="act-btn' + (danger ? ' danger' : '') + '" id="' + id + '"><span>' + icon + '</span>' + esc(label) + '</button>';
   }
 
+  // ---------- 常备食材预警 ----------
+  // 为常用食材设常备数量：在库低于该数量时存储层自动生成 source='staple' 的待购项
+  // （数量 = 建议购买量），买到录入后预警自动解除；生成/解除/增删改都进追溯流水。
+  function renderStaples() {
+    var rows = store.listStapleStatus();
+    var root = $('#stapleList');
+    if (!rows.length) {
+      root.innerHTML = '<p class="hint staple-empty">还没有常备食材。点上方「设置常备食材」，' +
+        '在库低于常备数量时会自动在下方清单生成待购提醒。</p>';
+      return;
+    }
+    root.innerHTML = rows.map(function (r) {
+      var st = r.staple;
+      var cat = FreshRules.categories.filter(function (c) { return c.id === st.categoryId; })[0];
+      return '<div class="shop-card staple-card' + (r.below ? ' low' : '') + '">' +
+        '<div class="shop-main"><div class="shop-title">' +
+          '<span class="shop-name">' + esc(st.name) + '</span>' +
+          (cat ? '<span class="fc-cat">' + esc(cat.name) + '</span>' : '') +
+          (r.below
+            ? '<span class="staple-pill low">需补货</span>'
+            : '<span class="staple-pill ok">充足</span>') +
+        '</div>' +
+        '<div class="shop-meta">' +
+          '<span>常备 ≥ ' + st.minQty + ' 份</span>' +
+          '<span>在库 ' + r.inStock + ' 份</span>' +
+          (r.below ? '<span>建议购买 ' + r.suggestedQty + ' 份</span>' : '') +
+          (r.below && r.coveredBy ? '<span>已生成待购项</span>' : '') +
+          (st.note ? '<span>备注：' + esc(st.note) + '</span>' : '') +
+        '</div></div>' +
+        '<div class="shop-actions">' +
+          '<button class="btn-ghost" data-edit-staple="' + esc(st.id) + '">编辑</button>' +
+          '<button class="btn-ghost danger" data-del-staple="' + esc(st.id) + '">删除</button>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+
+    $$('#stapleList [data-edit-staple]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var st = store.getStaple(b.getAttribute('data-edit-staple'));
+        if (st) openStapleForm(st);
+      });
+    });
+    $$('#stapleList [data-del-staple]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var st = store.getStaple(b.getAttribute('data-del-staple'));
+        if (!st) return;
+        if (!confirm('删除「' + st.name + '」的常备预警？\n其自动生成且仍待认领的待购项会一并撤下（已认领/已购买的保留）。')) return;
+        var r = guard(function () { return store.removeStaple(st.id); });
+        if (!r.ok) return;
+        toast('已删除常备预警：' + st.name);
+        renderAll();
+      });
+    });
+  }
+
+  function openStapleForm(staple) {
+    state.editingStapleId = staple ? staple.id : null;
+    $('#stapleFormTitle').textContent = staple ? '编辑常备食材：' + staple.name : '设置常备食材';
+    var presetCat = staple ? (staple.categoryId || '') : '';
+    if (!presetCat && staple && staple.name) {
+      var pm = FreshEngine.matchCategory(staple.name);
+      if (pm.category) presetCat = pm.category.id;
+    }
+    fillCategorySelect('stCategory', presetCat);
+    $('#stName').value = staple ? staple.name : '';
+    $('#stMinQty').value = staple ? staple.minQty : 1;
+    $('#stNote').value = staple ? (staple.note || '') : '';
+    $('#stCatHint').textContent = '';
+    $('#btnDeleteStaple').hidden = !staple;
+    $('#sheetStaple').hidden = false;
+  }
+
+  function saveStapleForm(e) {
+    e.preventDefault();
+    var fields = {
+      name: $('#stName').value.trim(),
+      categoryId: $('#stCategory').value,
+      minQty: Number($('#stMinQty').value),
+      note: $('#stNote').value.trim()
+    };
+    if (!fields.name) { toast('请填写食材名称'); return; }
+    if (!fields.categoryId) {
+      var m = FreshEngine.matchCategory(fields.name);
+      if (!m.category) { toast('未识别食材分类，请手动选择'); return; }
+      fields.categoryId = m.category.id;
+    }
+    if (!Number.isFinite(fields.minQty) || fields.minQty < 1) { toast('常备数量至少为 1 份'); return; }
+    try {
+      if (state.editingStapleId) {
+        store.updateStaple(state.editingStapleId, fields);
+        toast('已更新常备预警');
+      } else {
+        store.addStaple(fields);
+        toast('已设置常备预警：' + fields.name);
+      }
+    } catch (err) {
+      if (FreshStorage.StorageWriteError && FreshStorage.StorageWriteError.is(err)) {
+        showStorageFull(err); // 弹层保持、输入保留
+        return;
+      }
+      toast(err.message || '保存失败'); // 如同名常备食材已存在
+      return;
+    }
+    state.editingStapleId = null;
+    closeSheet('sheetStaple');
+    renderAll();
+  }
+
   // ---------- 补货清单 ----------
   function sameNameStock(name) {
     var n = FreshEngine.normalizeName(name);
@@ -786,6 +900,7 @@
   function renderShopping() {
     fillMemberDatalists();
     renderIdentityBar();
+    renderStaples();
     var counts = shopCounts();
     var done = store.listShopping('done');
     var badge = $('#shopBadge');
@@ -816,7 +931,8 @@
     root.innerHTML = rows.map(function (s) {
       var cat = FreshRules.categories.filter(function (c) { return c.id === s.categoryId; })[0];
       var srcTag = s.source === 'consume' ? '<span class="shop-src">↩️ 吃完补货</span>'
-        : s.source === 'discard' ? '<span class="shop-src">🗑️ 丢弃补货</span>' : '';
+        : s.source === 'discard' ? '<span class="shop-src">🗑️ 丢弃补货</span>'
+        : s.source === 'staple' ? '<span class="shop-src">🔔 常备预警</span>' : '';
       if (s.status === 'done') {
         var linked = s.itemId ? store.getItem(s.itemId) : null;
         var linkedHtml = linked
@@ -2105,6 +2221,11 @@
     'mealplan.add': ['新建用餐计划', 'a-plan', '📅'],
     'mealplan.complete': ['完成用餐计划', 'a-plan', '🍽️'],
     'mealplan.remove': ['删除用餐计划', 'a-remove', '🧹'],
+    'staple.add': ['设置常备预警', 'a-shop', '🔔'],
+    'staple.update': ['修改常备预警', 'a-shop', '✏️'],
+    'staple.remove': ['删除常备预警', 'a-remove', '🧹'],
+    'staple.alert': ['常备预警：生成待购', 'a-shop', '🔔'],
+    'staple.resolve': ['常备预警解除', 'a-shop', '✅'],
     'member.add': ['添加家庭成员', 'a-shop', '🧑'],
     'member.update': ['修改成员饮食信息', 'a-shop', '✏️'],
     'member.remove': ['删除家庭成员', 'a-remove', '🧹'],
@@ -2122,7 +2243,7 @@
       var lines = [];
       if (d.name) lines.push(esc(d.name));
       if (d.source) {
-        var srcLabel = { consume: '吃完补货', discard: '丢弃补货', manual: '手动', plan: '方案页带入' }[d.source] || d.source;
+        var srcLabel = { consume: '吃完补货', discard: '丢弃补货', manual: '手动', plan: '方案页带入', staple: '常备预警' }[d.source] || d.source;
         lines.push('来源：' + esc(String(d.source).indexOf('restock:') === 0 ? '待购购买录入'
           : String(d.source).indexOf('mealplan:') === 0 ? '用餐计划' : srcLabel));
       }
@@ -2142,6 +2263,16 @@
       }
       if (d.qty) lines.push('数量：' + esc(d.qty));
       if (d.note) lines.push('备注：' + esc(d.note));
+      if (e.action === 'staple.add') lines.push('常备数量：' + (d.minQty != null ? d.minQty + ' 份' : '—'));
+      if (e.action === 'staple.alert') {
+        lines.push('在库 ' + d.inStock + ' 份 < 常备 ' + d.minQty + ' 份，已生成待购项（建议购买 ' + d.suggestedQty + ' 份）');
+      }
+      if (e.action === 'staple.resolve') {
+        lines.push('在库回升至 ' + d.inStock + ' 份（常备 ' + d.minQty + ' 份），自动待购项已撤下');
+      }
+      if (e.action === 'staple.remove' && d.withdrawnShopping) {
+        lines.push('一并撤下待认领的自动待购项 ' + d.withdrawnShopping + ' 条');
+      }
       if (d.assignee) lines.push('负责人：' + esc(d.assignee));
       if (e.action === 'shopping.claim') lines.push('认领到：' + esc(d.to || ''));
       if (e.action === 'shopping.transfer') {
@@ -2166,7 +2297,7 @@
         });
       }
       if (d.changes && e.action !== 'shopping.update') {
-        var LABELS = { name: '名称', categoryId: '分类', purchaseDate: '购买日期', packageType: '包装', location: '位置', note: '备注' };
+        var LABELS = { name: '名称', categoryId: '分类', purchaseDate: '购买日期', packageType: '包装', location: '位置', note: '备注', minQty: '常备数量' };
         Object.keys(d.changes).forEach(function (k) {
           var c = d.changes[k];
           lines.push((LABELS[k] || k) + '：' + esc(short(c.from)) + ' → ' + esc(short(c.to)));
@@ -2354,6 +2485,7 @@
         // 取消购买录入：不完成待购项（状态保留），仅清掉本次录入上下文
         if (sheet.id === 'sheetForm') state.purchaseShopId = null;
         if (sheet.id === 'sheetDiet') state.dietCtx = null;
+        if (sheet.id === 'sheetStaple') state.editingStapleId = null;
         sheet.hidden = true;
       }
     });
@@ -2361,6 +2493,30 @@
     // 补货清单
     $('#btnAddShopping').addEventListener('click', function () { openShoppingForm(null); });
     $('#shoppingForm').addEventListener('submit', saveShoppingForm);
+
+    // 常备食材预警
+    $('#btnAddStaple').addEventListener('click', function () { openStapleForm(null); });
+    $('#stapleForm').addEventListener('submit', saveStapleForm);
+    $('#stName').addEventListener('input', function () {
+      var m = FreshEngine.matchCategory(this.value.trim());
+      if (m.category && !$('#stCategory').value) $('#stCategory').value = m.category.id;
+      $('#stCatHint').textContent = m.category
+        ? '识别为：' + m.category.name
+        : (this.value.trim() ? '未识别该食材，可在上方手动选择分类' : '');
+    });
+    $('#btnDeleteStaple').addEventListener('click', function () {
+      var id = state.editingStapleId;
+      var st = id ? store.getStaple(id) : null;
+      if (!st) return;
+      if (!confirm('删除「' + st.name + '」的常备预警？\n其自动生成且仍待认领的待购项会一并撤下（已认领/已购买的保留）。')) return;
+      var r = guard(function () { return store.removeStaple(id); });
+      if (!r.ok) return;
+      state.editingStapleId = null;
+      closeSheet('sheetStaple');
+      toast('已删除常备预警：' + st.name);
+      renderAll();
+    });
+
     $('#sName').addEventListener('input', function () {
       var m = FreshEngine.matchCategory(this.value.trim());
       if (m.category && !$('#sCategory').value) $('#sCategory').value = m.category.id;

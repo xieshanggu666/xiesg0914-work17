@@ -22,6 +22,7 @@
 | 注明使用了哪些食材 | 方案 `used[]`，卡片与详情都展示 |
 | 注明哪些仍需尽快处理 | 方案 `stillUrgent[]`（应用方案后未覆盖的临期/过期库存） |
 | 手动添加待购/从吃完或丢弃食材补货 | 补货视图与已归档详情「再买一份」；`storage.addShopping(fields, source)` |
+| 常备食材预警：设常备数量，低于自动生成待购（含建议购买量），买到录入后自动解除 | 补货视图常备块 + 弹层（`sheetStaple`）；存储层 `staples` 集合与 `syncStaplesImpl()` 随库存变动重估；`staple.add/update/remove/alert/resolve` 全入 `audit` |
 | 添加时提示同名在库食材 | `sameNameStock()` 归一化名称比对，勾选“仍要购买”才能保存 |
 | 家庭共享采购：负责人、备注、待认领/已认领/已购买 | 待购表单可选负责人（留空=待认领）；`claimShopping/transferShopping/releaseShopping`；状态筛选 |
 | 购买后录入、保存成功才完成待购并关联新库存 | `openForm(null, {purchaseShopId})` → 保存时 `completeShopping(id, newItemId)`；取消则待购保留 |
@@ -34,7 +35,7 @@
 | 创建方案/用餐计划时选择就餐成员 | 方案页 `#planDiners` 与计划表单 `#mDinerBar` 成员条；选择记忆在本机 `freshkeeper:diners` |
 | 对所选库存和方案食材给出明确冲突提示 | `diet.evaluate(members, targets)` 返回 blockers/warnings/likes；方案卡、快速勾选区、计划表单预览、计划卡、食材详情同步标注 |
 | 确认后继续或替换冲突食材 | 冲突解决弹层（sheetDiet）：方案可**同槽位替换**（`planner.substitutionCandidates/substituteInPlan`）、计划可移除；过敏必须勾选知悉风险才能继续，确认快照入审计 |
-| 所有记录可修改、可追溯 | 字段修订 `revisions[]`、事件软撤销、审计流水 `audit[]`、软删除可恢复、待购与用餐计划增删改及完成均入流水 |
+| 所有记录可修改、可追溯 | 字段修订 `revisions[]`、事件软撤销、审计流水 `audit[]`、软删除可恢复、待购与用餐计划及常备预警的增删改/完成/触发/解除均入流水 |
 
 ## 2. 保质期模型（核心设计）
 
@@ -152,7 +153,8 @@ localStorage 单键 `freshkeeper:v1`：
   ],
   "shopping": [
     { "id", "name", "categoryId", "qty", "note", "status",
-      "assignee", "claimedAt", "source", "sourceItemId", "createdAt", "completedAt", "itemId" }
+      "assignee", "claimedAt", "source", "sourceItemId", "stapleId",
+      "createdAt", "completedAt", "itemId" }
   ],
   "mealPlans": [
     { "id", "name", "date",
@@ -167,6 +169,11 @@ localStorage 单键 `freshkeeper:v1`：
       "avoidTags":   [...],   // 忌口/不喜欢（标签形态同上）
       "preferTags":  [...],   // 偏好/爱吃
       "createdAt" }
+  ],
+  "staples": [
+    { "id", "name", "categoryId",
+      "minQty",                // 常备数量：在库低于该数触发预警（1–99 整数）
+      "note", "createdAt" }
   ],
   "audit": [ { "seq", "at", "action", "detail", "snapshot" } ]
 }
@@ -243,8 +250,9 @@ localStorage 单键 `freshkeeper:v1`：
   "id", "name", "categoryId", "qty", "note",
   "status": "unclaimed" | "claimed" | "done",   // 待认领 / 已认领 / 已购买
   "assignee", "claimedAt",                       // 负责人（≤20 字）与最近一次认领/转交时间
-  "source": "manual" | "consume" | "discard",  // 手动 / 吃完补货 / 丢弃补货
+  "source": "manual" | "consume" | "discard" | "staple",  // 手动 / 吃完补货 / 丢弃补货 / 常备预警自动生成
   "sourceItemId", "sourceName",                 // 发起补货的归档食材
+  "stapleId",                                    // source=staple 时关联的常备预警
   "createdAt", "completedAt",
   "itemId"                                      // 完成后关联的新库存 ID
 }
@@ -366,6 +374,49 @@ localStorage 单键 `freshkeeper:v1`：
 `detail.dietAck`）记录在案，计划卡片长期展示“已确认过敏风险/忌口”。
 方案页与计划表单共用一份本机就餐成员记忆（`freshkeeper:diners`，清空数据时删除）。
 
+### 5.5 常备食材预警模型（低于常备量 → 自动待购 → 买到解除）
+
+`staples[]` 与其他业务数据同存于一个 localStorage 键，随导出/导入/清空一并处理，
+导入走严格结构校验（名称必填、`minQty` 必须是 1–99 的整数，畸形整体拒绝）；
+本地加载旧数据时宽松迁移（缺数量补 1、超界截断、坏记录跳过）。无 `staples` 字段的
+旧版本数据加载为空数组。常备名称按归一化值（去空白、转小写）唯一，重复添加拒绝。
+
+```jsonc
+{
+  "id", "name", "categoryId",
+  "minQty",      // 常备数量：在库低于该数触发预警
+  "note", "createdAt"
+}
+```
+
+**在库数量** = 未删除、未归档（无 consume/discard 终止事件）的同名食材条数，
+名称比对与待购同名确认同一 `normalizeName` 口径（去空白、转小写、精确匹配）；
+冷冻中的食材计入在库。
+
+**重估时机**：预警不存状态，每次库存变动后由存储层 `syncStaplesImpl()` 全量重估
+（addItem / updateItem / addEvent / undoEvent / removeItem / restoreItem /
+completeShopping / 导入 / 常备设置增删改，全部在同一写入事务内完成，失败整体回滚）：
+
+- **触发**：在库 < minQty 且没有开口待购覆盖 → 自动生成
+  `source: 'staple'`、`stapleId` 关联的待认领待购项，`qty` = **建议购买量**
+  （minQty − 在库，文案 “N 份”），写 `staple.alert` 流水（含在库数/常备数/建议量/待购 ID）。
+  已有同名开口待购（手动或吃完/丢弃补货）视为已覆盖，**不重复生成**；
+  覆盖中的自动待购项不被系统改写（用户可自由编辑数量、认领、转交）。
+- **解除**：在库回升到常备线（买到录入、撤销归档、恢复删除等任意路径）→
+  自动生成的开口待购项被撤下，写 `staple.resolve` 流水。走「已买到」流程时，
+  `addItem` 的重估先于 `completeShopping`：买够了 → 待购项撤下、完成幂等返回
+  false（界面按“预警自动解除”提示）；**没买够** → 旧项正常完成，并立即按新的
+  缺口重新生成一条预警待购。
+- **删除常备设置**：一并撤下其自动生成且仍待认领的待购项（已认领/已购买的保留，
+  不打扰进行中的采购），写 `staple.remove` 流水（含撤下条数）。
+- 用户手动删除自动待购项后，若库存仍低于常备线，下次库存变动会重新生成——
+  提醒按设计是“执着”的；不再需要提醒时应删除常备设置本身。
+
+界面入口在补货视图顶部的常备块：每条常备显示 常备数量 / 在库数量 / 充足|需补货 /
+建议购买量 / 是否已生成待购项，可编辑、可删除；自动生成的待购项在清单中带
+“🔔 常备预警”来源标记，购买流程与普通待购完全一致（保存成功才完成并关联新库存）。
+`staple.add/update/remove/alert/resolve` 全部进入 `audit` 追溯。
+
 ## 6. 目录与测试
 
 ```
@@ -378,7 +429,7 @@ freshkeeper/
 │   ├── diet.js           # 纯逻辑：饮食标签匹配、过敏/忌口/偏好冲突分级、替换安全性
 │   ├── planner.js        # 组合方案（菜谱槽位匹配 + 处置方案 + 冲突食材同槽位替换）
 │   ├── ocr.js            # 拍照识别 + 标签文本解析（解析函数可单测）
-│   ├── storage.js        # 持久化 + 修订 + 审计流水 + 待购 + 用餐计划 + 家庭成员
+│   ├── storage.js        # 持久化 + 修订 + 审计流水 + 待购 + 用餐计划 + 家庭成员 + 常备预警
 │   └── app.js            # DOM 渲染与交互（不含业务规则）
 └── test/
     ├── engine.test.js    # node:test 单元测试
@@ -386,6 +437,7 @@ freshkeeper/
     ├── shopping.test.js  # 家庭采购单元测试（三态/认领/转交/取消/迁移）
     ├── mealplan.test.js  # 用餐计划闭环单元测试
     ├── diet.test.js      # 饮食偏好/忌口/过敏单元测试（匹配/分级/替换/成员 CRUD/导入）
+    ├── staple.test.js    # 常备预警单元测试（触发/建议量/解除/CRUD/导入迁移）
     └── e2e.smoke.js      # jsdom 端到端界面断言
 ```
 

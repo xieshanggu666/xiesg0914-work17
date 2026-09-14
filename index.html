@@ -45,6 +45,16 @@
       <div class="shop-identity" id="shopIdentity" role="button" tabindex="0"></div>
       <button class="btn-primary shop-add-btn" id="btnAddShopping">＋ 手动添加待购食材</button>
     </div>
+    <!-- 常备食材预警：在库低于常备数量时自动生成待购项 -->
+    <div class="staple-block">
+      <div class="staple-head">
+        <h3>🔔 常备食材预警</h3>
+        <button class="btn-ghost staple-add-btn" id="btnAddStaple">＋ 设置常备食材</button>
+      </div>
+      <p class="hint">给常用食材设常备数量：在库低于该数量会<b>自动生成待购项</b>（含建议购买量），
+        买到并录入库存后预警<b>自动解除</b>，变化记入追溯。</p>
+      <div id="stapleList" class="staple-list"></div>
+    </div>
     <div class="filter-bar" id="shopFilter">
       <button class="chip active" data-f="open">待办</button>
       <button class="chip muted" data-f="unclaimed">待认领</button>
@@ -219,6 +229,46 @@
       <div class="form-actions">
         <button type="button" class="btn-ghost" data-close>取消</button>
         <button type="submit" class="btn-primary" id="sSubmit">加入待购</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ========== 添加/编辑常备食材预警弹层 ========== -->
+<div class="sheet" id="sheetStaple" hidden>
+  <div class="sheet-mask" data-close></div>
+  <div class="sheet-panel">
+    <div class="sheet-handle"></div>
+    <h3 id="stapleFormTitle">设置常备食材</h3>
+    <p class="hint">在库数量低于常备数量时，会自动在补货清单生成待购项并给出建议购买量；
+      买到并录入库存后预警自动解除。</p>
+    <form id="stapleForm">
+      <label class="field">
+        <span>食材名称 <em>*</em></span>
+        <input type="text" id="stName" required maxlength="30" placeholder="如：鸡蛋 / 牛奶 / 大米" autocomplete="off">
+        <small class="cat-hint" id="stCatHint"></small>
+      </label>
+
+      <label class="field">
+        <span>食材分类（识别不准时可手改）</span>
+        <select id="stCategory"></select>
+      </label>
+
+      <div class="field-row">
+        <label class="field">
+          <span>常备数量（份）<em>*</em></span>
+          <input type="number" id="stMinQty" required min="1" max="99" step="1" value="1" inputmode="numeric">
+        </label>
+        <label class="field">
+          <span>备注（可选）</span>
+          <input type="text" id="stNote" maxlength="60" placeholder="如：要土鸡蛋 / 全脂奶">
+        </label>
+      </div>
+
+      <div class="form-actions">
+        <button type="button" class="btn-ghost danger" id="btnDeleteStaple" hidden>删除</button>
+        <button type="button" class="btn-ghost" data-close>取消</button>
+        <button type="submit" class="btn-primary">保存</button>
       </div>
     </form>
   </div>

@@ -5,7 +5,8 @@
  *   items: 食材记录（fields 为当前字段，revisions 保存每次修改的字段快照）
  *   shopping: 待购补货清单（手动添加或从已吃完/丢弃食材发起；支持家庭认领/转交/取消认领；购买录入保存后才完成并关联新库存）
  *   mealPlans: 用餐计划（名称 + 用餐日期 + 食材快照；完成时复用期限事件写回食材）
- *   audit: 操作流水（创建/修改/事件/撤销/方案应用/补货/用餐计划），永不物理删除
+ *   staples: 常备食材预警（常备数量；在库低于该数量自动生成待购项，买到录入后预警自动解除）
+ *   audit: 操作流水（创建/修改/事件/撤销/方案应用/补货/用餐计划/常备预警），永不物理删除
  *
  * 追溯模型：
  *   - 食材字段修改：旧字段整体进 revisions，audit 记录变更字段
@@ -175,7 +176,8 @@
   //   { id, name, categoryId, qty, note,
   //     status: 'unclaimed'（待认领）| 'claimed'（已认领）| 'done'（已购买），
   //     assignee（负责人）, claimedAt,
-  //     source: manual|consume|discard, sourceItemId, sourceName,
+  //     source: manual|consume|discard|staple（常备预警自动生成）, sourceItemId, sourceName,
+  //     stapleId（source=staple 时关联的常备预警）,
   //     createdAt, completedAt, itemId（完成后关联的新库存） }
   function normalizeShopping(raw, index, errors, opts) {
     opts = opts || {};
@@ -216,6 +218,8 @@
     }
     if (typeof raw.sourceItemId === 'string' && raw.sourceItemId) entry.sourceItemId = raw.sourceItemId;
     if (typeof raw.sourceName === 'string' && raw.sourceName) entry.sourceName = raw.sourceName.slice(0, 30);
+    // 常备预警自动生成的待购项记录来源预警 ID（导入/加载时保留关联）
+    if (typeof raw.stapleId === 'string' && raw.stapleId) entry.stapleId = raw.stapleId;
     if (status === 'done') {
       if (typeof raw.completedAt === 'string' && raw.completedAt) entry.completedAt = raw.completedAt;
       else entry.completedAt = entry.createdAt;
@@ -339,7 +343,45 @@
     return member;
   }
 
-  // 严格校验整份导入数据，返回 { items, shopping, mealPlans, members, audit }；非法即抛错（原子拒绝）
+  // 常备食材预警结构：
+  //   { id, name, categoryId, minQty（常备数量：在库低于该数触发预警）, note, createdAt }
+  // 在库数量 = 未归档且未删除的同名食材条数（归一化名称精确匹配，与待购同名比对同一口径）
+  function parseMinQty(v, lenient) {
+    var n = Number(v);
+    if (!Number.isFinite(n) || n < 1) return lenient ? 1 : null;
+    n = Math.floor(n);
+    if (n > 99) return lenient ? 99 : null;
+    return n;
+  }
+
+  function normalizeStaple(raw, index, errors, opts) {
+    opts = opts || {};
+    var lenient = !!opts.lenient;
+    var where = '第 ' + (index + 1) + ' 条常备食材';
+    if (!isPlainObject(raw)) {
+      if (!lenient) errors.push(where + '不是对象');
+      return null;
+    }
+    if (typeof raw.name !== 'string' || !raw.name.trim()) {
+      if (!lenient) errors.push(where + '缺少名称（name）');
+      return null;
+    }
+    var minQty = parseMinQty(raw.minQty, lenient);
+    if (minQty === null) {
+      errors.push(where + '「' + raw.name + '」常备数量（minQty）必须是 1–99 的整数');
+      return null;
+    }
+    return {
+      id: (typeof raw.id === 'string' && raw.id) ? raw.id : uid('st'),
+      name: raw.name.trim().slice(0, 30),
+      categoryId: typeof raw.categoryId === 'string' ? raw.categoryId.slice(0, 30) : '',
+      minQty: minQty,
+      note: typeof raw.note === 'string' ? raw.note.slice(0, 200) : '',
+      createdAt: typeof raw.createdAt === 'string' && raw.createdAt ? raw.createdAt : nowISO()
+    };
+  }
+
+  // 严格校验整份导入数据，返回 { items, shopping, mealPlans, members, staples, audit }；非法即抛错（原子拒绝）
   function validatePayload(input) {
     var data = typeof input === 'string' ? JSON.parse(input) : input;
     if (!isPlainObject(data)) throw new Error('文件内容不是有效的数据对象');
@@ -405,6 +447,22 @@
         });
       }
     }
+    var staples = [];
+    if (data.staples !== undefined && data.staples !== null) {
+      if (!Array.isArray(data.staples)) {
+        errors.push('staples 常备食材必须是数组');
+      } else {
+        var seenSt = {};
+        data.staples.forEach(function (raw, i) {
+          var staple = normalizeStaple(raw, i, errors);
+          if (staple) {
+            if (seenSt[staple.id]) errors.push('常备食材 ID 重复：' + staple.id + '（同一文件内出现多次）');
+            seenSt[staple.id] = true;
+            staples.push(staple);
+          }
+        });
+      }
+    }
     if (errors.length) {
       var e = new Error('导入文件有 ' + errors.length + ' 处结构问题，已取消导入（未改动现有库存）：\n' +
         errors.slice(0, 5).map(function (x) { return '· ' + x; }).join('\n') +
@@ -415,7 +473,7 @@
     var audit = Array.isArray(data.audit)
       ? data.audit.map(normalizeAuditEntry).filter(Boolean)
       : [];
-    return { items: items, shopping: shopping, mealPlans: mealPlans, members: members, audit: audit };
+    return { items: items, shopping: shopping, mealPlans: mealPlans, members: members, staples: staples, audit: audit };
   }
 
   function createStore(backend) {
@@ -432,7 +490,7 @@
 
     // 加载历史数据采用“宽松迁移”：尽力归一化，无法修复的记录丢弃并告警，避免页面白屏
     function load() {
-      var EMPTY = { items: [], shopping: [], mealPlans: [], members: [], audit: [] };
+      var EMPTY = { items: [], shopping: [], mealPlans: [], members: [], staples: [], audit: [] };
       var raw = backend.getItem(STORE_KEY);
       if (!raw) return EMPTY;
       try {
@@ -465,12 +523,19 @@
             }).filter(Boolean)
           : [];
         if (mbTotal - members.length > 0) skipped += mbTotal - members.length;
+        var stTotal = Array.isArray(parsed.staples) ? parsed.staples.length : 0;
+        var staples = Array.isArray(parsed.staples)
+          ? parsed.staples.map(function (raw, i) {
+              return normalizeStaple(raw, i, errors, { lenient: true });
+            }).filter(Boolean)
+          : [];
+        if (stTotal - staples.length > 0) skipped += stTotal - staples.length;
         var audit = Array.isArray(parsed.audit)
           ? parsed.audit.map(normalizeAuditEntry).filter(Boolean) : [];
         if (skipped > 0 && typeof console !== 'undefined') {
           console.warn('FreshKeeper：本地数据跳过 ' + skipped + ' 条无法修复的异常记录');
         }
-        return { items: items, shopping: shopping, mealPlans: mealPlans, members: members, audit: audit };
+        return { items: items, shopping: shopping, mealPlans: mealPlans, members: members, staples: staples, audit: audit };
       } catch (e) {
         if (typeof console !== 'undefined') console.warn('FreshKeeper：本地数据解析失败，使用空库存', e);
         return EMPTY;
@@ -576,6 +641,7 @@
       };
       db.items.push(item);
       log('item.create', { itemId: item.id, name: item.name, source: source || 'manual' });
+      syncStaplesImpl();
       persist();
       return item;
     }
@@ -603,6 +669,7 @@
         if (Object.prototype.hasOwnProperty.call(patch, f)) item[f] = patch[f];
       });
       log('item.update', { itemId: id, name: item.name, changes: changes, source: source || 'manual' });
+      syncStaplesImpl(); // 改名/改分类可能改变同名在库计数
       persist();
       return item;
     }
@@ -627,6 +694,7 @@
       }
       item.events.push(ev);
       log('event.add', { itemId: itemId, name: item.name, eventType: type, eventId: ev.id, at: ev.at, payload: payload || {} });
+      syncStaplesImpl(); // 吃完/丢弃会减少在库数量，可能触发常备预警
       persist();
       return ev;
     }
@@ -642,6 +710,7 @@
       found.ev.deleted = true;
       found.ev.deletedAt = nowISO();
       log('event.undo', { itemId: found.item.id, name: found.item.name, eventId: eventId, eventType: found.ev.type });
+      syncStaplesImpl(); // 撤销吃完/丢弃会让在库回升，预警可能随之解除
       persist();
       return true;
     }
@@ -670,6 +739,7 @@
       item.removed = true;
       item.removedAt = nowISO();
       log('item.remove', { itemId: id, name: item.name, snapshot: JSON.parse(JSON.stringify(item)) });
+      syncStaplesImpl();
       persist();
       return true;
     }
@@ -680,6 +750,7 @@
       delete item.removed;
       delete item.removedAt;
       log('item.restore', { itemId: id, name: item.name });
+      syncStaplesImpl();
       persist();
       return true;
     }
@@ -820,6 +891,8 @@
         shoppingId: id, name: entry.name, itemId: itemId || null,
         assignee: entry.assignee || null
       });
+      // 购买完成后若在库仍低于常备线（买的数量不够），立即重新生成预警待购
+      syncStaplesImpl();
       persist();
       return true;
     }
@@ -965,6 +1038,180 @@
         if (t && out.indexOf(t) < 0) out.push(t);
       });
       return out;
+    }
+
+    // ---- 常备食材预警 ----
+    // 模型：为常用食材设常备数量 minQty；每次库存变动后 syncStaplesImpl() 重估：
+    //   · 在库（未归档未删除的同名食材条数）< minQty 且没有开口待购覆盖
+    //     → 自动生成 source='staple' 的待购项，数量 = 建议购买量（minQty − 在库）；
+    //   · 在库回升到常备线（买到录入/撤销归档/恢复记录等任意路径）
+    //     → 预警解除，自动生成的开口待购项随之撤下；
+    //   · 已有同名开口待购（手动/补货来源）视为已覆盖，不重复生成。
+    // 预警的生成与解除、常备设置的增删改全部写入 audit。
+    function normName(v) {
+      return String(v == null ? '' : v).trim().toLowerCase().replace(/\s+/g, '');
+    }
+
+    function getStaple(id) {
+      return db.staples.filter(function (s) { return s.id === id; })[0] || null;
+    }
+
+    function findStapleByName(name) {
+      var n = normName(name);
+      if (!n) return null;
+      return db.staples.filter(function (s) { return normName(s.name) === n; })[0] || null;
+    }
+
+    // 某常备食材的实时状态：在库数 / 是否低于常备线 / 建议购买量 / 覆盖它的开口待购
+    function stapleStatusOf(st) {
+      var n = normName(st.name);
+      var inStock = 0;
+      db.items.forEach(function (it) {
+        if (it.removed || isEnded(it)) return;
+        if (normName(it.name) === n) inStock++;
+      });
+      var auto = null, covered = null;
+      db.shopping.forEach(function (s) {
+        if (SHOP_OPEN_STATUSES.indexOf(s.status) < 0) return;
+        if (s.source === 'staple' && s.stapleId === st.id) { auto = s; return; }
+        if (!covered && normName(s.name) === n) covered = s;
+      });
+      return {
+        staple: st,
+        inStock: inStock,
+        below: inStock < st.minQty,
+        suggestedQty: Math.max(st.minQty - inStock, 0),
+        coveredBy: auto || covered,
+        autoShoppingId: auto ? auto.id : null
+      };
+    }
+
+    // 库存变动后重估全部常备预警（在事务内调用，不自行 persist）
+    function syncStaplesImpl() {
+      if (!db.staples.length) return;
+      db.staples.forEach(function (st) {
+        var stt = stapleStatusOf(st);
+        if (stt.below) {
+          if (!stt.coveredBy) {
+            var entry = {
+              id: uid('sh'),
+              name: st.name,
+              categoryId: st.categoryId || '',
+              qty: stt.suggestedQty + ' 份',
+              note: st.note || '',
+              status: 'unclaimed',
+              source: 'staple',
+              createdAt: nowISO()
+            };
+            entry.stapleId = st.id;
+            db.shopping.push(entry);
+            log('staple.alert', {
+              stapleId: st.id, name: st.name,
+              inStock: stt.inStock, minQty: st.minQty,
+              suggestedQty: stt.suggestedQty, shoppingId: entry.id
+            });
+          }
+        } else if (stt.autoShoppingId) {
+          var sid = stt.autoShoppingId;
+          var gone = getShopping(sid);
+          db.shopping = db.shopping.filter(function (s) { return s.id !== sid; });
+          log('staple.resolve', {
+            stapleId: st.id, name: st.name,
+            inStock: stt.inStock, minQty: st.minQty,
+            shoppingId: sid, assignee: gone && gone.assignee ? gone.assignee : null
+          });
+        }
+      });
+    }
+
+    function addStapleImpl(fields) {
+      var name = String(fields.name || '').trim().slice(0, 30);
+      if (!name) throw new Error('常备食材名称不能为空');
+      if (findStapleByName(name)) throw new Error('已存在同名常备食材：' + name);
+      var minQty = parseMinQty(fields.minQty, false);
+      if (minQty === null) throw new Error('常备数量必须是 1–99 的整数');
+      var staple = {
+        id: uid('st'),
+        name: name,
+        categoryId: typeof fields.categoryId === 'string' ? fields.categoryId.slice(0, 30) : '',
+        minQty: minQty,
+        note: String(fields.note || '').slice(0, 200),
+        createdAt: nowISO()
+      };
+      db.staples.push(staple);
+      log('staple.add', {
+        stapleId: staple.id, name: staple.name, minQty: staple.minQty,
+        categoryId: staple.categoryId, note: staple.note
+      });
+      // 新设置立即评估：库存已低于常备线时马上生成待购项
+      syncStaplesImpl();
+      persist();
+      return staple;
+    }
+
+    function updateStapleImpl(id, patch) {
+      var st = getStaple(id);
+      if (!st) return null;
+      var changes = {};
+      if (Object.prototype.hasOwnProperty.call(patch, 'name')) {
+        var name = String(patch.name || '').trim().slice(0, 30);
+        if (!name) throw new Error('常备食材名称不能为空');
+        var other = findStapleByName(name);
+        if (other && other.id !== id) throw new Error('已存在同名常备食材：' + name);
+        if (name !== st.name) changes.name = { from: st.name, to: name };
+        st.name = name;
+      }
+      if (Object.prototype.hasOwnProperty.call(patch, 'minQty')) {
+        var minQty = parseMinQty(patch.minQty, false);
+        if (minQty === null) throw new Error('常备数量必须是 1–99 的整数');
+        if (minQty !== st.minQty) changes.minQty = { from: st.minQty, to: minQty };
+        st.minQty = minQty;
+      }
+      if (Object.prototype.hasOwnProperty.call(patch, 'categoryId')) {
+        var cat = String(patch.categoryId || '').slice(0, 30);
+        if (cat !== st.categoryId) changes.categoryId = { from: st.categoryId, to: cat };
+        st.categoryId = cat;
+      }
+      if (Object.prototype.hasOwnProperty.call(patch, 'note')) {
+        var note = String(patch.note || '').slice(0, 200);
+        if (note !== st.note) changes.note = { from: st.note, to: note };
+        st.note = note;
+      }
+      if (!Object.keys(changes).length) return st;
+      log('staple.update', { stapleId: id, name: st.name, changes: changes });
+      // 常备线/名称变化可能立即改变预警状态（调高 → 生成待购；调低 → 解除）
+      syncStaplesImpl();
+      persist();
+      return st;
+    }
+
+    function removeStapleImpl(id) {
+      var st = getStaple(id);
+      if (!st) return false;
+      db.staples = db.staples.filter(function (s) { return s.id !== id; });
+      // 一并撤下该预警自动生成且仍待认领的待购项（已认领/已购买的保留，不打扰进行中的采购）
+      var withdrawn = 0;
+      db.shopping = db.shopping.filter(function (s) {
+        var autoOpen = s.source === 'staple' && s.stapleId === id && s.status === 'unclaimed';
+        if (autoOpen) withdrawn++;
+        return !autoOpen;
+      });
+      log('staple.remove', {
+        stapleId: id, name: st.name, minQty: st.minQty, withdrawnShopping: withdrawn
+      });
+      persist();
+      return true;
+    }
+
+    // 常备设置按添加时间正序
+    function listStaples() {
+      return db.staples.slice().sort(function (a, b) {
+        return a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0;
+      });
+    }
+
+    function listStapleStatus() {
+      return listStaples().map(stapleStatusOf);
     }
 
     // ---- 用餐计划 ----
@@ -1170,6 +1417,7 @@
         shopping: part(db.shopping),
         mealPlans: part(db.mealPlans),
         members: part(db.members),
+        staples: part(db.staples),
         audit: part(db.audit)
       };
       var total = part(db);
@@ -1181,6 +1429,7 @@
           shopping: db.shopping.length,
           mealPlans: db.mealPlans.length,
           members: db.members.length,
+          staples: db.staples.length,
           audit: db.audit.length
         }
       };
@@ -1218,22 +1467,31 @@
           em2.errors = dupMb;
           throw em2;
         }
+        var dupSt = clean.staples.filter(function (s) { return getStaple(s.id); }).map(function (s) { return s.id; });
+        if (dupSt.length) {
+          var es2 = new Error('导入文件中有 ' + dupSt.length + ' 条常备食材与现有设置 ID 相同，已取消合并。');
+          es2.errors = dupSt;
+          throw es2;
+        }
         db.items = db.items.concat(clean.items);
         db.shopping = db.shopping.concat(clean.shopping);
         db.mealPlans = db.mealPlans.concat(clean.mealPlans);
         db.members = db.members.concat(clean.members);
+        db.staples = db.staples.concat(clean.staples);
         // 审计顺序以实际时间 at 为准（见 compareAuditDesc），不再平移外部 seq，
         // 否则较早生成的备份会被误排到本地最新操作之后
         db.audit = db.audit.concat(clean.audit);
         var importedMaxSeq = clean.audit.reduce(function (m, e) { return Math.max(m, Number(e.seq) || 0); }, 0);
         auditSeq = Math.max(auditSeq, importedMaxSeq);
       } else {
-        db = { items: clean.items, shopping: clean.shopping, mealPlans: clean.mealPlans, members: clean.members, audit: clean.audit };
+        db = { items: clean.items, shopping: clean.shopping, mealPlans: clean.mealPlans, members: clean.members, staples: clean.staples, audit: clean.audit };
         auditSeq = db.audit.reduce(function (m, e) { return Math.max(m, e.seq || 0); }, 0);
       }
-      log('data.import', { merge: !!merge, items: clean.items.length, shopping: clean.shopping.length, mealPlans: clean.mealPlans.length, members: clean.members.length, audit: clean.audit.length });
+      // 导入改变了库存与常备设置，立即重估预警（低于常备线的生成待购、回升的解除）
+      syncStaplesImpl();
+      log('data.import', { merge: !!merge, items: clean.items.length, shopping: clean.shopping.length, mealPlans: clean.mealPlans.length, members: clean.members.length, staples: clean.staples.length, audit: clean.audit.length });
       persist();
-      return { items: clean.items.length, shopping: clean.shopping.length, mealPlans: clean.mealPlans.length, members: clean.members.length, audit: clean.audit.length };
+      return { items: clean.items.length, shopping: clean.shopping.length, mealPlans: clean.mealPlans.length, members: clean.members.length, staples: clean.staples.length, audit: clean.audit.length };
     }
 
     function seedDemoImpl(demoItems, Engine) {
@@ -1267,6 +1525,12 @@
       demoMembers.forEach(function (m) {
         if (!findMemberByName(m.name)) addMember(m);
       });
+
+      // 演示常备预警：鸡蛋常备 1 份（演示库存含 1 样鸡蛋，初始状态为“充足”）。
+      // 重复载入演示不重复添加；吃完鸡蛋后在库降为 0，即可看到自动生成待购项的效果。
+      [{ name: '鸡蛋', categoryId: 'egg', minQty: 1 }].forEach(function (s) {
+        if (!findStapleByName(s.name)) addStaple(s);
+      });
       return specs.length;
     }
 
@@ -1293,6 +1557,9 @@
     function addMealPlan(fields, source) { return tx(function () { return addMealPlanImpl(fields, source); }); }
     function completeMealPlan(id, actions, at) { return tx(function () { return completeMealPlanImpl(id, actions, at); }); }
     function removeMealPlan(id) { return tx(function () { return removeMealPlanImpl(id); }); }
+    function addStaple(fields) { return tx(function () { return addStapleImpl(fields); }); }
+    function updateStaple(id, patch) { return tx(function () { return updateStapleImpl(id, patch); }); }
+    function removeStaple(id) { return tx(function () { return removeStapleImpl(id); }); }
     function importJSON(text, merge) { return tx(function () { return importJSONImpl(text, merge); }); }
     function seedDemo(demoItems, Engine) { return tx(function () { return seedDemoImpl(demoItems, Engine); }); }
 
@@ -1308,6 +1575,8 @@
       completeMealPlan: completeMealPlan, removeMealPlan: removeMealPlan,
       addMember: addMember, getMember: getMember, findMemberByName: findMemberByName,
       updateMember: updateMember, removeMember: removeMember, listMembers: listMembers,
+      addStaple: addStaple, getStaple: getStaple, updateStaple: updateStaple,
+      removeStaple: removeStaple, listStaples: listStaples, listStapleStatus: listStapleStatus,
       auditEntries: auditEntries, exportJSON: exportJSON, importJSON: importJSON,
       pruneHistory: pruneHistory, storageInfo: storageInfo,
       seedDemo: seedDemo, _key: function () { return STORE_KEY; }

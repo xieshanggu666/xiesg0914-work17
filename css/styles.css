@@ -305,6 +305,24 @@ main { max-width: 640px; margin: 0 auto; padding: 0 12px; }
 .shop-actions .btn-ghost.danger { background: var(--danger-soft); color: var(--expired); }
 .shop-link { display: inline-block; margin-top: 5px; font-size: 12.5px; color: var(--green-dark); cursor: pointer; text-decoration: none; }
 .shop-link.gone { color: var(--ink-2); cursor: default; }
+/* 常备食材预警块：低于常备线的卡片用橙色左边条提示“需补货” */
+.staple-block {
+  background: #fff; border-radius: 12px; padding: 12px 14px;
+  box-shadow: var(--shadow); margin-bottom: 10px;
+}
+.staple-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.staple-head h3 { font-size: 15px; margin: 0; }
+.staple-add-btn { flex: 0 0 auto; padding: 5px 12px; font-size: 12.5px; }
+.staple-list { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.staple-list:empty { display: none; }
+.staple-card { border-left-color: var(--green); padding: 10px 12px; }
+.staple-card.low { border-left-color: var(--warn); }
+.staple-pill { font-size: 11px; border-radius: 6px; padding: 1px 7px; }
+.staple-pill.ok { background: var(--green-soft); color: var(--green-dark); }
+.staple-pill.low { background: var(--warn-soft); color: #8a5d00; }
+.staple-empty { margin: 6px 0 2px; }
+.staple-card .shop-actions { flex-direction: row; }
+
 /* 认领/转交弹层：成员快速选择 */
 .assign-members { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 12px; }
 .assign-members-label { font-size: 12.5px; color: var(--ink-2); width: 100%; }
